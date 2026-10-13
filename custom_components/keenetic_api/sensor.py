@@ -30,7 +30,10 @@ from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import KeeneticRouterCoordinator
-from .keenetic import KeeneticFullData
+from .keenetic import (
+    KeeneticFullData, KeeneticModemData, modem_number, modem_text,
+    modem_frequency, modem_sinr, modem_carriers,
+)
 from .const import (
     DOMAIN,
     COORD_FULL,
@@ -155,6 +158,96 @@ SENSORS_STAT_INTERFACE: tuple[KeeneticRouterSensorEntityDescription, ...] = (
     ),
 )
 
+
+@dataclass(frozen=True, kw_only=True)
+class KeeneticModemSensorDescription(SensorEntityDescription):
+    value_fn: Callable[[dict[str, Any]], StateType]
+    attributes_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+
+
+MODEM_SENSOR_TYPES: tuple[KeeneticModemSensorDescription, ...] = (
+    KeeneticModemSensorDescription(
+        key="modem_info",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: modem_text(d, "product") or modem_text(d, "description") or d.get("id"),
+        attributes_fn=lambda d: {
+            key: d[key] for key in ("imei", "imsi", "iccid", "phone-number", "serial")
+            if d.get(key) not in (None, "")
+        },
+    ),
+    *(
+        KeeneticModemSensorDescription(
+            key=f"modem_{key}",
+            entity_category=EntityCategory.DIAGNOSTIC,
+            value_fn=lambda d, field=field: modem_text(d, field),
+        )
+        for key, field in (
+            ("connection_state", "connection-state"), ("sim", "sim"),
+            ("operator", "operator"), ("mobile", "mobile"),
+            ("apn", "apn"), ("ip_address", "address"),
+            ("band", "band"), ("plmn", "plmn"),
+            ("bssid", "bssid"), ("enb_id", "enb-id"),
+            ("sector_id", "sector-id"), ("tac", "tac"),
+            ("phy_cell_id", "phy-cell-id"),
+        )
+    ),
+    *(
+        KeeneticModemSensorDescription(
+            key=key,
+            device_class=SensorDeviceClass.SIGNAL_STRENGTH,
+            native_unit_of_measurement=unit,
+            state_class=SensorStateClass.MEASUREMENT,
+            entity_category=EntityCategory.DIAGNOSTIC,
+            value_fn=(lambda d: modem_sinr(d)) if key == "sinr" else (lambda d, field=key: modem_number(d, field)),
+            attributes_fn=(lambda d: {"source": "sinr" if d.get("sinr") not in (None, "") else "cinr"}) if key == "sinr" else None,
+        )
+        for key, unit in (("rssi", "dBm"), ("rsrp", "dBm"), ("rsrq", "dB"), ("sinr", "dB"))
+    ),
+    KeeneticModemSensorDescription(
+        key="modem_signal_level", state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: modem_number(d, "signal-level"),
+    ),
+    KeeneticModemSensorDescription(
+        key="modem_temperature", device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: modem_number(d, "temperature"),
+    ),
+    KeeneticModemSensorDescription(
+        key="modem_bandwidth", native_unit_of_measurement="MHz",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: modem_number(d, "bandwidth"),
+    ),
+    *(
+        KeeneticModemSensorDescription(
+            key=f"modem_{key}_frequency", device_class=SensorDeviceClass.FREQUENCY,
+            native_unit_of_measurement="MHz", state_class=SensorStateClass.MEASUREMENT,
+            entity_category=EntityCategory.DIAGNOSTIC,
+            value_fn=lambda d, field=field: modem_frequency(d, field),
+        )
+        for key, field in (("downlink", "dl-freq"), ("uplink", "ul-freq"))
+    ),
+    KeeneticModemSensorDescription(
+        key="modem_earfcn", entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: modem_number(d, "earfcn"),
+    ),
+    KeeneticModemSensorDescription(
+        key="modem_pin_attempts", entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: modem_number(d, "pin-attempts"),
+    ),
+    KeeneticModemSensorDescription(
+        key="modem_carriers", entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: len(modem_carriers(d)) if "carrier" in d else None,
+        attributes_fn=lambda d: {"carriers": modem_carriers(d)},
+    ),
+)
+
+ALWAYS_PRESENT_MODEM_SENSORS = {"modem_info", "rssi", "rsrp", "rsrq", "sinr"}
+STAT_SENSOR_KEYS = {description.key for description in SENSORS_STAT_INTERFACE}
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry, 
@@ -163,6 +256,7 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id][COORD_FULL]
 
     sensors = []
+    known_legacy_interfaces = set()
     for description in SENSOR_TYPES:
         try:
             if description.value(coordinator, description.key) is not None:
@@ -172,6 +266,7 @@ async def async_setup_entry(
 
     for interface, data_interface in coordinator.data.show_interface.items():
         if interface in coordinator.router.request_interface:
+            known_legacy_interfaces.add(interface)
             new_name = coordinator.router.request_interface[interface]
             for description in SENSORS_STAT_INTERFACE:
                 try:
@@ -179,7 +274,36 @@ async def async_setup_entry(
                 except Exception as err:
                     _LOGGER.debug(f'async_setup_entry sensor SENSORS_STAT_INTERFACE {description} err - {err}')
 
+    known_modem_sensors: set[tuple[str, str]] = set()
+
+    def collect_modem_sensors() -> list[SensorEntity]:
+        new_sensors = []
+        for interface, modem in coordinator.data.modems.items():
+            if interface not in known_legacy_interfaces:
+                known_legacy_interfaces.add(interface)
+                name = coordinator.router.request_interface.get(interface, interface)
+                new_sensors.extend(
+                    KeeneticRouterSensor(coordinator, description, interface, name)
+                    for description in SENSORS_STAT_INTERFACE
+                )
+            for description in MODEM_SENSOR_TYPES:
+                key = (modem.identity, description.key)
+                if key in known_modem_sensors:
+                    continue
+                if description.key not in ALWAYS_PRESENT_MODEM_SENSORS and description.value_fn(modem.details) is None:
+                    continue
+                known_modem_sensors.add(key)
+                new_sensors.append(KeeneticModemSensor(coordinator, modem, description))
+        return new_sensors
+
+    sensors.extend(collect_modem_sensors())
     async_add_entities(sensors, False)
+
+    def add_new_modem_sensors() -> None:
+        if new_sensors := collect_modem_sensors():
+            async_add_entities(new_sensors, False)
+
+    entry.async_on_unload(coordinator.async_add_listener(add_new_modem_sensors))
 
 class KeeneticRouterSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorEntity):
     _attr_has_entity_name = True
@@ -194,7 +318,8 @@ class KeeneticRouterSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorE
     ) -> None:
         super().__init__(coordinator)
 
-        self._attr_device_info = coordinator.device_info
+        modem = coordinator.data.modems.get(obj_id)
+        self._attr_device_info = coordinator.modem_device_info(modem) if modem else coordinator.device_info
         self.obj_id = obj_id
         self._attr_unique_id = f"{coordinator.unique_id}_{description.key}_{self.obj_id}"
         self.entity_description = description
@@ -204,7 +329,22 @@ class KeeneticRouterSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorE
     @property
     def native_value(self) -> StateType:
         """Sensor value."""
-        return self.entity_description.value(self.coordinator, self.obj_id)
+        if not self.available:
+            return None
+        try:
+            return self.entity_description.value(self.coordinator, self.obj_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    @property
+    def available(self) -> bool:
+        if self.entity_description.key in STAT_SENSOR_KEYS:
+            if not super().available or self.obj_id not in self.coordinator.data.show_interface:
+                return False
+            if self.entity_description.key == "timestamp":
+                return self.coordinator.data.show_interface[self.obj_id].get("uptime") is not None
+            return self.coordinator.data.stat_interface.get(self.obj_id, {}).get(self.entity_description.key) is not None
+        return super().available
 
     @property
     def extra_state_attributes(self) -> dict[str, str] | None:
@@ -213,3 +353,47 @@ class KeeneticRouterSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorE
             return self.entity_description.attributes_fn(self.coordinator.data)
         else:
             return None
+
+
+class KeeneticModemSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorEntity):
+    """A diagnostic value bound to a physical modem."""
+
+    _attr_has_entity_name = True
+    entity_description: KeeneticModemSensorDescription
+
+    def __init__(
+        self,
+        coordinator: KeeneticRouterCoordinator,
+        modem: KeeneticModemData,
+        description: KeeneticModemSensorDescription,
+    ) -> None:
+        super().__init__(coordinator)
+        self.identity = modem.identity
+        self.entity_description = description
+        self._attr_unique_id = f"{coordinator.unique_id}_{modem.identity}_{description.key}"
+        self._attr_translation_key = description.key
+        self._attr_device_info = coordinator.modem_device_info(modem)
+
+    @property
+    def modem(self) -> KeeneticModemData | None:
+        return next(
+            (modem for modem in self.coordinator.data.modems.values() if modem.identity == self.identity),
+            None,
+        )
+
+    @property
+    def available(self) -> bool:
+        modem = self.modem
+        return super().available and modem is not None and self.entity_description.value_fn(modem.details) is not None
+
+    @property
+    def native_value(self) -> StateType:
+        modem = self.modem
+        return self.entity_description.value_fn(modem.details) if modem else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        modem = self.modem
+        if modem and self.entity_description.attributes_fn:
+            return self.entity_description.attributes_fn(modem.details)
+        return None

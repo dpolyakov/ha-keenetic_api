@@ -133,7 +133,33 @@
       },
       "txspeed": {
         "name": "{name} Исходящая скорость"
-      }
+      },
+      "modem_info": {"name": "Информация о модеме"},
+      "modem_connection_state": {"name": "Состояние соединения"},
+      "modem_sim": {"name": "Состояние SIM"},
+      "modem_operator": {"name": "Оператор"},
+      "modem_mobile": {"name": "Сеть"},
+      "modem_apn": {"name": "APN"},
+      "modem_ip_address": {"name": "IP-адрес"},
+      "modem_band": {"name": "Диапазон"},
+      "modem_plmn": {"name": "PLMN"},
+      "modem_bssid": {"name": "BSSID"},
+      "modem_enb_id": {"name": "eNB ID"},
+      "modem_sector_id": {"name": "ID сектора"},
+      "modem_tac": {"name": "TAC"},
+      "modem_phy_cell_id": {"name": "ID соты"},
+      "rssi": {"name": "RSSI"},
+      "rsrp": {"name": "RSRP"},
+      "rsrq": {"name": "RSRQ"},
+      "sinr": {"name": "SINR"},
+      "modem_signal_level": {"name": "Уровень сигнала"},
+      "modem_temperature": {"name": "Температура модема"},
+      "modem_bandwidth": {"name": "Ширина канала"},
+      "modem_downlink_frequency": {"name": "Частота приёма"},
+      "modem_uplink_frequency": {"name": "Частота передачи"},
+      "modem_earfcn": {"name": "EARFCN"},
+      "modem_pin_attempts": {"name": "Осталось попыток PIN"},
+      "modem_carriers": {"name": "Несущие"}
     },
     "binary_sensor": {
       "connected_to_router": {
@@ -147,6 +173,9 @@
       },
       "interface_pingcheck": {
         "name": "{name} PingCheck"
+      },
+      "modem_roaming": {"name": "Роуминг"},
+      "modem_plugged": {"name": "Модем подключён"
       }
     },
     "image": {

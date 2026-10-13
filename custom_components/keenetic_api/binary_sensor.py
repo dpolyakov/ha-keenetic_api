@@ -21,7 +21,7 @@ from .const import (
     COORD_FULL,
 )
 from .coordinator import KeeneticRouterCoordinator
-from .keenetic import KeeneticFullData
+from .keenetic import KeeneticFullData, KeeneticModemData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,11 +72,13 @@ async def async_setup_entry(
 
     coordinator = hass.data[DOMAIN][entry.entry_id][COORD_FULL]
     binary_sensors: list[BinarySensorEntity] = []
+    known_legacy_interfaces = set()
 
     binary_sensors.append(KeeneticBinarySensorEntity(coordinator, BINARY_SENSOR_TYPES["connected_to_router"], "connected_to_router", coordinator.router.name_device))
 
     for interface, data_interface in coordinator.data.show_interface.items():
         if interface in coordinator.router.request_interface:
+            known_legacy_interfaces.add(interface)
             new_name = coordinator.router.request_interface[interface]
             binary_sensors.append(
                 KeeneticBinarySensorEntity(
@@ -100,7 +102,38 @@ async def async_setup_entry(
         name_media = f"Media{int(usb['port'])-1}"
         binary_sensors.append(KeeneticBinarySensorEntity(coordinator, BINARY_SENSOR_TYPES["connected_to_media"], name_media, name_media))
 
+    known_modem_sensors: set[tuple[str, str]] = set()
+
+    def collect_modem_sensors() -> list[BinarySensorEntity]:
+        new_sensors = []
+        for interface, modem in coordinator.data.modems.items():
+            if interface not in known_legacy_interfaces:
+                known_legacy_interfaces.add(interface)
+                name = coordinator.router.request_interface.get(interface, interface)
+                new_sensors.append(
+                    KeeneticBinarySensorEntity(
+                        coordinator, BINARY_SENSOR_TYPES["connected_to_interface"], interface, name
+                    )
+                )
+            for key in ("modem_roaming", "modem_plugged"):
+                if (modem.identity, key) in known_modem_sensors:
+                    continue
+                if key == "modem_roaming" and "roaming" not in modem.details:
+                    continue
+                if key == "modem_plugged" and "plugged" not in modem.details:
+                    continue
+                known_modem_sensors.add((modem.identity, key))
+                new_sensors.append(KeeneticModemBinarySensor(coordinator, modem, key))
+        return new_sensors
+
+    binary_sensors.extend(collect_modem_sensors())
     async_add_entities(binary_sensors, False)
+
+    def add_new_modem_sensors() -> None:
+        if new_sensors := collect_modem_sensors():
+            async_add_entities(new_sensors, False)
+
+    entry.async_on_unload(coordinator.async_add_listener(add_new_modem_sensors))
 
 
 class KeeneticBinarySensorEntity(CoordinatorEntity[KeeneticRouterCoordinator], BinarySensorEntity):
@@ -119,14 +152,15 @@ class KeeneticBinarySensorEntity(CoordinatorEntity[KeeneticRouterCoordinator], B
         self._obj_id = obj_id
         self._attr_key = description.key
         self.entity_description = description
-        self._attr_device_info = coordinator.device_info
+        modem = coordinator.data.modems.get(obj_id)
+        self._attr_device_info = coordinator.modem_device_info(modem) if modem else coordinator.device_info
         self._attr_unique_id = f"{coordinator.unique_id}_{self._attr_key}_{self._obj_id}"
         self._attr_translation_key = self._attr_key
         self._attr_translation_placeholders = {"name": f"{obj_name}"}
 
     @property
     def is_on(self) -> bool:
-        return self.entity_description.value_fn(self.coordinator, self._obj_id)
+        return self.entity_description.value_fn(self.coordinator, self._obj_id) if self.available else False
 
     @property
     def available(self) -> bool:
@@ -141,3 +175,42 @@ class KeeneticBinarySensorEntity(CoordinatorEntity[KeeneticRouterCoordinator], B
             return self.entity_description.attributes_fn(self.coordinator, self._obj_id)
         else:
             return None
+
+
+class KeeneticModemBinarySensor(CoordinatorEntity[KeeneticRouterCoordinator], BinarySensorEntity):
+    """Physical modem roaming or USB connection state."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: KeeneticRouterCoordinator, modem: KeeneticModemData, key: str) -> None:
+        super().__init__(coordinator)
+        self.identity = modem.identity
+        self.key = key
+        self._attr_unique_id = f"{coordinator.unique_id}_{modem.identity}_{key}"
+        self._attr_translation_key = key
+        self._attr_device_info = coordinator.modem_device_info(modem)
+        if key == "modem_roaming":
+            self._attr_device_class = None
+
+    @property
+    def modem(self) -> KeeneticModemData | None:
+        return next(
+            (modem for modem in self.coordinator.data.modems.values() if modem.identity == self.identity),
+            None,
+        )
+
+    @property
+    def available(self) -> bool:
+        modem = self.modem
+        field = "roaming" if self.key == "modem_roaming" else "plugged"
+        return super().available and modem is not None and modem.details.get(field) is not None
+
+    @property
+    def is_on(self) -> bool:
+        modem = self.modem
+        if modem is None:
+            return False
+        value = modem.details.get("roaming" if self.key == "modem_roaming" else "plugged")
+        return value is True or str(value).lower() in {"yes", "true", "1"}

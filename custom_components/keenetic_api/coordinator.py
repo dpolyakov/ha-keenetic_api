@@ -11,9 +11,11 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.const import CONF_HOST
 
-from .keenetic import Router
+from .keenetic import Router, KeeneticModemData
 from .const import (
     DOMAIN, 
     FW_SANDBOX,
@@ -32,12 +34,14 @@ class KeeneticRouterCoordinator(DataUpdateCoordinator):
             hass: HomeAssistant,
             router: Router,
             update_interval: int,
-            entry: ConfigEntry
+            entry: ConfigEntry,
+            parent_device_id: str,
     ) -> None:
         self.router = router
         self.entry = entry
         self._host = entry.data[CONF_HOST]
         self.unique_id = f"{entry.unique_id}_full"
+        self.parent_device_id = parent_device_id
         super().__init__(
             hass,
             _LOGGER,
@@ -50,7 +54,7 @@ class KeeneticRouterCoordinator(DataUpdateCoordinator):
         _errr = None
         try:
             full_data = await self.router.custom_request()
-            _LOGGER.debug(f"{self.router.mac} _async_update_data full_data {full_data}")
+            self._sync_modem_devices(full_data.modems)
         except Exception as err:
             _LOGGER.debug(f"{self.router.mac} UpdateFailed _async_update_data (err {err})")
             _errr = err
@@ -63,6 +67,46 @@ class KeeneticRouterCoordinator(DataUpdateCoordinator):
         if _errr != None:
             raise UpdateFailed(f"{self.router.mac} UpdateFailed (err {_errr})")
         return full_data
+
+    def modem_device_info(self, modem: KeeneticModemData) -> DeviceInfo:
+        """Describe a physical modem as a device attached to this router."""
+        details = modem.details
+        ati = details.get("ati") or {}
+        if not isinstance(ati, dict):
+            ati = {}
+        model = details.get("product") or details.get("description") or modem.interface
+        model = str(model).strip() or modem.interface
+        return DeviceInfo(
+            identifiers={(DOMAIN, modem.identity)},
+            via_device_id=self.parent_device_id,
+            manufacturer=details.get("manufacturer") or ati.get("manufacturer"),
+            model=model,
+            sw_version=details.get("fw"),
+            name=f"{model} ({modem.interface})",
+        )
+
+    def _sync_modem_devices(self, modems: dict[str, KeeneticModemData]) -> None:
+        """Register modems and retain legacy interface entity unique IDs."""
+        devices = dr.async_get(self.hass)
+        entities = er.async_get(self.hass)
+        existing = {
+            (entry.domain, entry.unique_id): entry
+            for entry in er.async_entries_for_config_entry(entities, self.entry.entry_id)
+        }
+        for interface, modem in modems.items():
+            device = devices.async_get_or_create(
+                config_entry_id=self.entry.entry_id,
+                **self.modem_device_info(modem),
+            )
+            for domain, keys in (
+                ("sensor", ("rxbytes", "txbytes", "timestamp", "rxspeed", "txspeed")),
+                ("binary_sensor", ("connected_to_interface",)),
+            ):
+                for key in keys:
+                    unique_id = f"{self.unique_id}_{key}_{interface}"
+                    if entity := existing.get((domain, unique_id)):
+                        if entity.device_id != device.id:
+                            entities.async_update_entity(entity.entity_id, device_id=device.id)
 
     @property
     def device_info(self) -> DeviceInfo:

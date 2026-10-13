@@ -135,7 +135,33 @@
         },
         "txspeed": {
           "name": "{name} Uplink speed"
-        }
+        },
+        "modem_info": {"name": "Modem information"},
+        "modem_connection_state": {"name": "Connection state"},
+        "modem_sim": {"name": "SIM state"},
+        "modem_operator": {"name": "Operator"},
+        "modem_mobile": {"name": "Mobile network"},
+        "modem_apn": {"name": "APN"},
+        "modem_ip_address": {"name": "IP address"},
+        "modem_band": {"name": "Band"},
+        "modem_plmn": {"name": "PLMN"},
+        "modem_bssid": {"name": "BSSID"},
+        "modem_enb_id": {"name": "eNB ID"},
+        "modem_sector_id": {"name": "Sector ID"},
+        "modem_tac": {"name": "TAC"},
+        "modem_phy_cell_id": {"name": "Cell ID"},
+        "rssi": {"name": "RSSI"},
+        "rsrp": {"name": "RSRP"},
+        "rsrq": {"name": "RSRQ"},
+        "sinr": {"name": "SINR"},
+        "modem_signal_level": {"name": "Signal level"},
+        "modem_temperature": {"name": "Modem temperature"},
+        "modem_bandwidth": {"name": "Bandwidth"},
+        "modem_downlink_frequency": {"name": "Downlink frequency"},
+        "modem_uplink_frequency": {"name": "Uplink frequency"},
+        "modem_earfcn": {"name": "EARFCN"},
+        "modem_pin_attempts": {"name": "PIN attempts remaining"},
+        "modem_carriers": {"name": "Carriers"}
       },
       "image": {
         "qrwifi": {
@@ -159,6 +185,9 @@
         },
         "interface_pingcheck": {
           "name": "{name} PingCheck"
+        },
+        "modem_roaming": {"name": "Roaming"},
+        "modem_plugged": {"name": "Modem plugged in"
         }
       },
       "switch": {

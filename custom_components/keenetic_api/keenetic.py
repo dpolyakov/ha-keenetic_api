@@ -7,6 +7,7 @@ from typing import Literal, Any
 import asyncio
 import aiohttp
 import logging
+import math
 import aiofiles.os
 from pathlib import Path
 from dataclasses import dataclass
@@ -27,6 +28,13 @@ class KeeneticFullData:
     show_media: dict[str, Any]
     stat_interface: dict[str, Any]
     show_pingcheck: dict[str, Any]
+    modems: dict[str, KeeneticModemData]
+
+@dataclass
+class KeeneticModemData:
+    interface: str
+    identity: str
+    details: dict[str, Any]
 
 @dataclass
 class DataDevice():
@@ -109,6 +117,52 @@ LIST_INTERFACES_PUBLIC = [
     "Ethernet",
 ]
 
+MOBILE_MODEM_TYPES = {"UsbLte", "UsbModem", "UsbQmi", "Yota"}
+
+
+def is_mobile_modem(interface: dict[str, Any]) -> bool:
+    """Recognize cellular USB interfaces without relying on their numbering."""
+    traits = interface.get("traits") or []
+    return interface.get("type") in MOBILE_MODEM_TYPES or (
+        "Usb" in traits and "Mobile" in traits
+    )
+
+
+def modem_number(details: dict[str, Any], key: str) -> int | float | None:
+    """Convert modem measurements, which RCI often returns as strings."""
+    raw = details.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def modem_text(details: dict[str, Any], key: str) -> str | None:
+    value = details.get(key)
+    return str(value) if value is not None and value != "" else None
+
+
+def modem_frequency(details: dict[str, Any], key: str) -> float | None:
+    value = modem_number(details, key)
+    return value / 1000 if value is not None else None
+
+
+def modem_sinr(details: dict[str, Any]) -> int | float | None:
+    key = "sinr" if details.get("sinr") not in (None, "") else "cinr"
+    return modem_number(details, key)
+
+
+def modem_carriers(details: dict[str, Any]) -> list[dict[str, Any]]:
+    carriers = details.get("carrier") or {}
+    if not isinstance(carriers, dict):
+        return []
+    return [{**data, "index": index} for index, data in carriers.items() if isinstance(data, dict)]
+
 class Router:
     def __init__(
         self,
@@ -125,6 +179,7 @@ class Router:
         self._username = username
         self._password = password
         self.request_interface = {}
+        self._modem_ids_by_interface: dict[str, str] = {}
 
         self._mac = ""
         self._serial_number = ""
@@ -391,16 +446,68 @@ class Router:
         return new_data
 
     async def show_stat_interface(self, stat_interfaces: list = None):
-        stat_interfaces = stat_interfaces or self.request_interface
+        if stat_interfaces is None:
+            stat_interfaces = list(self.request_interface)
+        if not stat_interfaces:
+            return {}
         data_json_send=[]
         for row in stat_interfaces:
             data_json_send.append({"show": {"interface": {"stat": {"name": row}}}})
-        data_show_stat_interface = await self.api("post", "/rci/", json=data_json_send)
-        # _LOGGER.debug(f"{self._mac} data_show_stat_interface {data_show_stat_interface} ")
+        try:
+            data_show_stat_interface = await self.api("post", "/rci/", json=data_json_send)
+        except Exception as err:
+            _LOGGER.debug("%s interface statistics request failed: %s", self._mac, err)
+            data_show_stat_interface = []
+        if not isinstance(data_show_stat_interface, list):
+            data_show_stat_interface = []
         stat_interface={}
         for idx, row in enumerate(stat_interfaces):
-            stat_interface[row] = data_show_stat_interface[idx]['show']['interface']['stat']
+            try:
+                stats = data_show_stat_interface[idx]['show']['interface']['stat']
+                if not isinstance(stats, dict):
+                    raise TypeError("statistics are not an object")
+            except (IndexError, KeyError, TypeError):
+                try:
+                    response = await self.api("post", "/rci/", json=[data_json_send[idx]])
+                    stats = response[0]['show']['interface']['stat']
+                except Exception:
+                    stats = {}
+            stat_interface[row] = stats if isinstance(stats, dict) else {}
         return stat_interface
+
+    async def show_modem_interfaces(self, interfaces: list[str]) -> dict[str, dict[str, Any]]:
+        """Get full operational data for each modem using the named RCI query."""
+        details = {}
+        for name in interfaces:
+            try:
+                responses = await self.api(
+                    "post", "/rci/", json=[{"show": {"interface": {"name": name}}}]
+                )
+            except Exception as err:
+                _LOGGER.debug("%s modem %s request failed: %s", self._mac, name, err)
+                continue
+            if not isinstance(responses, list) or not responses:
+                continue
+            response = responses[0]
+            if not isinstance(response, dict):
+                continue
+            show = response.get("show")
+            interface = show.get("interface") if isinstance(show, dict) else None
+            if isinstance(interface, dict) and interface.get("id", name) == name:
+                details[name] = interface
+        return details
+
+    def modem_identity(self, interface: str, details: dict[str, Any]) -> str:
+        """Use physical identity when present, retaining it through partial polls."""
+        for field in ("imei", "serial"):
+            if value := details.get(field):
+                source = f"{field}:{value}"
+                break
+        else:
+            source = self._modem_ids_by_interface.get(interface, f"interface:{interface}")
+        self._modem_ids_by_interface[interface] = source
+        digest = sha256(f"{self._mac}:{source}".encode()).hexdigest()[:32]
+        return f"{self._mac}_modem_{digest}"
 
     async def custom_request(self):
         data_json_send=[]
@@ -424,6 +531,18 @@ class Router:
 
         show_system = full_info_other[0]['show']['system']
         show_interface = full_info_other[1]['show']['interface']
+        modem_interfaces = {
+            name: data for name, data in show_interface.items()
+            if isinstance(data, dict) and is_mobile_modem(data)
+        }
+        for name in set(self._modem_ids_by_interface) - set(modem_interfaces):
+            del self._modem_ids_by_interface[name]
+        detailed_modems = await self.show_modem_interfaces(list(modem_interfaces)) if modem_interfaces else {}
+        modems = {}
+        for name, base in modem_interfaces.items():
+            details = {**base, **detailed_modems.get(name, {})}
+            modems[name] = KeeneticModemData(name, self.modem_identity(name, details), details)
+            self.request_interface[name] = f"{details.get('type', 'Mobile')} {details.get('description', '')}".strip()
         show_associations = full_info_other[2]['show']['associations']
         show_rc_system_usb = full_info_other[3]['show']['rc']['system'].get('usb', [])
         show_rc_ip_http = full_info_other[4]['show']['rc']['ip']['http']
@@ -477,7 +596,7 @@ class Router:
                 if interfaces := pingcheck.get('interface', False):
                     for interface in interfaces:
                         interface_data = interfaces[interface]
-                        interface_name = self.request_interface[interface]
+                        interface_name = self.request_interface.get(interface, interface)
                         show_pingcheck[interface] = DataPingCheck(
                             interface_name,
                             interface_data.get('status', 'not ready'),
@@ -487,7 +606,9 @@ class Router:
         else:
             show_media = full_info_other[5]['show'].get('media', {}) if self.usb else {}
 
-        stat_interface = await self.show_stat_interface()
+        stat_interface = await self.show_stat_interface([
+            name for name in self.request_interface if name in show_interface
+        ])
 
         return KeeneticFullData(
             show_system,
@@ -502,4 +623,5 @@ class Router:
             show_media,
             stat_interface,
             show_pingcheck,
+            modems,
             )

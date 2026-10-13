@@ -22,6 +22,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 
 from .services import async_setup_services, async_unload_services
 from .coordinator import (
@@ -67,7 +68,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     client = await get_api(hass, entry.data)
 
-    coordinator_full = KeeneticRouterCoordinator(hass, client, entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL), entry)
+    parent_device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, client.mac)},
+        connections={(CONNECTION_NETWORK_MAC, client.mac)},
+        manufacturer="Keenetic",
+        name=entry.unique_id,
+        model=client.model,
+        hw_version=client.hw_type,
+        configuration_url=client.url_router,
+    )
+
+    coordinator_full = KeeneticRouterCoordinator(hass, client, entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL), entry, parent_device.id)
     await coordinator_full.async_config_entry_first_refresh()
 
     coordinator_firmware = KeeneticRouterFirmwareCoordinator(hass, client, SCAN_INTERVAL_FIREWARE, entry)
