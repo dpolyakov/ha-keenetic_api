@@ -26,6 +26,7 @@
         "description": "Дополнительные настройки.",
         "data": {
           "scan_interval": "Интервал скарирования (секунд).",
+          "sms_recipient": "Номер получателя SMS по умолчанию.",
           "create_image_qr": "Создать объекты Image QG WiFi.",
           "create_entity_all_cliens_button_policy": "Создать объекты Select политик для всех устройств.",
           "cliens_select_policy": "Создать объекты Select политик по выбранным:",
@@ -36,7 +37,8 @@
       "configure_other": {
         "description": "Дополнительные настройки.",
         "data": {
-          "scan_interval": "Интервал скарирования (секунд)."
+          "scan_interval": "Интервал скарирования (секунд).",
+          "sms_recipient": "Номер получателя SMS по умолчанию."
         }
       }
     }
@@ -85,6 +87,25 @@
           "description": "Тип backup."
         }
       }
+    },
+    "list_sms": {
+      "name": "Получить список SMS",
+      "description": "Вернуть сообщения, сохранённые в модеме Keenetic.",
+      "fields": {
+        "device_id": {"name": "Устройство"},
+        "entry_id": {"name": "Интеграция"},
+        "interface": {"name": "Интерфейс модема"}
+      }
+    },
+    "mark_sms_read": {
+      "name": "Пометить SMS прочитанным",
+      "description": "Пометить одно сообщение в модеме прочитанным.",
+      "fields": {
+        "device_id": {"name": "Устройство"},
+        "entry_id": {"name": "Интеграция"},
+        "interface": {"name": "Интерфейс модема"},
+        "sms_id": {"name": "ID сообщения"}
+      }
     }
   },
   "entity": {
@@ -98,6 +119,9 @@
       }
     },
     "sensor": {
+      "sms_unread": {
+        "name": "Непрочитанные SMS"
+      },
       "cpuload": {
         "name": "Загрузка процессора"
       },

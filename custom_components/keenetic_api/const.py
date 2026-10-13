@@ -32,6 +32,7 @@ POLICY_DEFAULT: Final = "default"
 POLICY_NOT_INTERNET: Final = "not_internet"
 
 CROUTER: Final = "client_router"
+CONF_SMS_RECIPIENT: Final = "sms_recipient"
 
 DEFAULT_BACKUP_TYPE_FILE: Final = ["config", "firmware"]
 

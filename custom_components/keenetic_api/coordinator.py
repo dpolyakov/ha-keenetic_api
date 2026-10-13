@@ -15,7 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.const import CONF_HOST
 
-from .keenetic import Router, KeeneticModemData
+from .keenetic import Router, KeeneticModemData, SmsEventTracker
 from .const import (
     DOMAIN, 
     FW_SANDBOX,
@@ -42,6 +42,7 @@ class KeeneticRouterCoordinator(DataUpdateCoordinator):
         self._host = entry.data[CONF_HOST]
         self.unique_id = f"{entry.unique_id}_full"
         self.parent_device_id = parent_device_id
+        self._sms_tracker = SmsEventTracker()
         super().__init__(
             hass,
             _LOGGER,
@@ -55,6 +56,19 @@ class KeeneticRouterCoordinator(DataUpdateCoordinator):
         try:
             full_data = await self.router.custom_request()
             self._sync_modem_devices(full_data.modems)
+            for interface, inbox in full_data.sms.items():
+                modem = full_data.modems.get(interface)
+                if modem is None:
+                    continue
+                for message in self._sms_tracker.new_messages(modem, inbox):
+                    self.hass.bus.async_fire("keenetic_api_sms", {
+                        "entry_id": self.entry.entry_id,
+                        "interface": interface,
+                        "sms_id": message["id"],
+                        "from": message["from"],
+                        "timestamp": message["timestamp"],
+                        "message": message["text"],
+                    })
         except Exception as err:
             _LOGGER.debug(f"{self.router.mac} UpdateFailed _async_update_data (err {err})")
             _errr = err

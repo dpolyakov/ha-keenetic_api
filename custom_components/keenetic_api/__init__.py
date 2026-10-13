@@ -20,11 +20,13 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import aiohttp_client
+from homeassistant.helpers import config_validation as cv, discovery
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 
 from .services import async_setup_services, async_unload_services
+from .notify import async_setup_modem_notify
 from .coordinator import (
     KeeneticRouterCoordinator, 
     KeeneticRouterFirmwareCoordinator, 
@@ -48,6 +50,8 @@ from .const import (
     CONF_SELECT_CREATE_DT,
     SCAN_INTERVAL_RC_INTERFACE,
 )
+
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 PLATFORMS: list[Platform] = [
     Platform.UPDATE,
@@ -99,6 +103,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     await async_setup_services(hass)
+    await discovery.async_load_platform(
+        hass,
+        Platform.NOTIFY,
+        DOMAIN,
+        {"name": f"Keenetic SMS {entry.unique_id}", "entry_id": entry.entry_id},
+        {},
+    )
+    await async_setup_modem_notify(hass, entry, coordinator_full)
 
     try:
         remove_entities_or_devices(hass, entry)

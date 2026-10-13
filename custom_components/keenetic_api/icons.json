@@ -76,6 +76,8 @@
     },
     "services": {
         "request_api": "mdi:api",
-        "backup_router": "mdi:file-document-plus"
+        "backup_router": "mdi:file-document-plus",
+        "list_sms": "mdi:message-text",
+        "mark_sms_read": "mdi:email-open"
     }
 }

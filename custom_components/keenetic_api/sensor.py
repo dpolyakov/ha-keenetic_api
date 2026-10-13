@@ -294,6 +294,10 @@ async def async_setup_entry(
                     continue
                 known_modem_sensors.add(key)
                 new_sensors.append(KeeneticModemSensor(coordinator, modem, description))
+            sms_key = (modem.identity, "sms_unread")
+            if sms_key not in known_modem_sensors:
+                known_modem_sensors.add(sms_key)
+                new_sensors.append(KeeneticModemSmsSensor(coordinator, modem))
         return new_sensors
 
     sensors.extend(collect_modem_sensors())
@@ -396,4 +400,43 @@ class KeeneticModemSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorEn
         modem = self.modem
         if modem and self.entity_description.attributes_fn:
             return self.entity_description.attributes_fn(modem.details)
+        return None
+
+
+class KeeneticModemSmsSensor(CoordinatorEntity[KeeneticRouterCoordinator], SensorEntity):
+    """Unread SMS count and the latest complete message on a modem."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: KeeneticRouterCoordinator, modem: KeeneticModemData) -> None:
+        super().__init__(coordinator)
+        self.identity = modem.identity
+        self._attr_unique_id = f"{coordinator.unique_id}_{modem.identity}_sms_unread"
+        self._attr_translation_key = "sms_unread"
+        self._attr_device_info = coordinator.modem_device_info(modem)
+
+    @property
+    def inbox(self):
+        for modem in self.coordinator.data.modems.values():
+            if modem.identity == self.identity:
+                return self.coordinator.data.sms.get(modem.interface)
+        return None
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.inbox is not None
+
+    @property
+    def native_value(self) -> int | None:
+        return inbox.unread_count if (inbox := self.inbox) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if (inbox := self.inbox) and (message := inbox.latest_complete):
+            return {
+                "sms_id": message["id"],
+                "from": message["from"],
+                "timestamp": message["timestamp"],
+                "message": message["text"],
+            }
         return None

@@ -50,10 +50,16 @@ class ModemPollingTest(unittest.TestCase):
         self.router._hw_type = "router"
         self.interfaces = {}
         self.details = {}
+        self.sms = {}
         self.requests = []
 
         async def api(method, endpoint, json=None):
             self.requests.append(json)
+            if isinstance(json, dict) and "sms" in json:
+                interface = json["sms"]["list"]["interface"]
+                if interface not in self.sms:
+                    raise ValueError("SMS unavailable")
+                return {"sms": {"list": self.sms[interface]}}
             first = json[0]
             if "system" in first.get("show", {}):
                 return bulk_response(self.interfaces)
@@ -114,6 +120,16 @@ class ModemPollingTest(unittest.TestCase):
         self.router.api = api
         data = self.poll()
         self.assertEqual(data.modems["UsbLte0"].details["connected"], "yes")
+
+    def test_sms_polling_is_separate_from_modem_health(self):
+        self.interfaces = {"UsbQmi0": {"id": "UsbQmi0", "type": "UsbQmi"}}
+        self.assertEqual(self.poll().sms, {})
+        self.sms["UsbQmi0"] = {"messages-count": 1, "messages": {
+            "sim-1": {"read": False, "parts": 1, "total-parts": 1, "text": "Привет"},
+        }}
+        data = self.poll()
+        self.assertEqual(data.sms["UsbQmi0"].unread_count, 1)
+        self.assertEqual(data.modems["UsbQmi0"].interface, "UsbQmi0")
 
     def test_statistics_error_on_one_modem_keeps_other_statistics(self):
         self.interfaces = {

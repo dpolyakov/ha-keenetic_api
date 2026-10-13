@@ -51,3 +51,40 @@ backup_router:
           options:
             - firmware
             - config
+list_sms:
+  fields:
+    device_id:
+      selector:
+        device:
+          integration: keenetic_api
+          manufacturer: Keenetic
+    entry_id:
+      selector:
+        config_entry:
+          integration: keenetic_api
+    interface:
+      required: false
+      example: UsbQmi0
+      selector:
+        text:
+mark_sms_read:
+  fields:
+    device_id:
+      selector:
+        device:
+          integration: keenetic_api
+          manufacturer: Keenetic
+    entry_id:
+      selector:
+        config_entry:
+          integration: keenetic_api
+    interface:
+      required: false
+      example: UsbQmi0
+      selector:
+        text:
+    sms_id:
+      required: true
+      example: sim-5
+      selector:
+        text:

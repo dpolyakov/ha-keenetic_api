@@ -42,6 +42,7 @@ from .const import (
     DEFAULT_BACKUP_TYPE_FILE,
     CONF_BACKUP_TYPE_FILE,
     CONF_SELECT_CREATE_DT,
+    CONF_SMS_RECIPIENT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,6 +116,10 @@ class KeeneticOptionsFlowHandler(OptionsFlowWithReload):
                         ),
                     ): vol.All(cv.positive_int, vol.Clamp(min=MIN_SCAN_INTERVAL)),
                     vol.Optional(
+                        CONF_SMS_RECIPIENT,
+                        default=self.config_entry.options.get(CONF_SMS_RECIPIENT, ""),
+                    ): cv.string,
+                    vol.Optional(
                         CONF_CREATE_ALL_CLIENTS_POLICY,
                         default=self.config_entry.options.get(
                             CONF_CREATE_ALL_CLIENTS_POLICY, False
@@ -173,6 +178,10 @@ class KeeneticOptionsFlowHandler(OptionsFlowWithReload):
                             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
                         ),
                     ): vol.All(cv.positive_int, vol.Clamp(min=MIN_SCAN_INTERVAL)),
+                    vol.Optional(
+                        CONF_SMS_RECIPIENT,
+                        default=self.config_entry.options.get(CONF_SMS_RECIPIENT, ""),
+                    ): cv.string,
                     vol.Optional(
                         CONF_BACKUP_TYPE_FILE,
                         default=self.config_entry.options.get(CONF_BACKUP_TYPE_FILE, DEFAULT_BACKUP_TYPE_FILE),

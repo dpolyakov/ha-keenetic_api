@@ -10,7 +10,9 @@ import logging
 import math
 import aiofiles.os
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,12 +31,105 @@ class KeeneticFullData:
     stat_interface: dict[str, Any]
     show_pingcheck: dict[str, Any]
     modems: dict[str, KeeneticModemData]
+    sms: dict[str, KeeneticSmsInbox] = field(default_factory=dict)
 
 @dataclass
 class KeeneticModemData:
     interface: str
     identity: str
     details: dict[str, Any]
+
+@dataclass
+class KeeneticSmsInbox:
+    messages: list[dict[str, Any]]
+
+    @property
+    def unread_count(self) -> int:
+        return sum(not message["read"] for message in self.messages)
+
+    @property
+    def latest_complete(self) -> dict[str, Any] | None:
+        complete = [message for message in self.messages if message["complete"]]
+        if not complete:
+            return None
+        def sort_key(message: dict[str, Any]) -> datetime:
+            try:
+                return parsedate_to_datetime(message["timestamp"]).replace(tzinfo=None)
+            except (TypeError, ValueError, KeyError):
+                return datetime.min
+        return max(enumerate(complete), key=lambda item: (sort_key(item[1]), item[0]))[1]
+
+
+class KeeneticSmsError(Exception):
+    """SMS command failed or returned an invalid response."""
+
+
+def is_sms_request(endpoint: str, payload: Any) -> bool:
+    """Identify requests whose payload or response may contain SMS contents."""
+    if endpoint.startswith("/rci/sms"):
+        return True
+    if isinstance(payload, dict):
+        return "sms" in payload
+    if isinstance(payload, list):
+        return any(is_sms_request(endpoint, item) for item in payload)
+    return False
+
+
+def parse_sms_list(response: Any) -> KeeneticSmsInbox:
+    """Normalize the Keenetic RCI message map without exposing partial text."""
+    if not isinstance(response, dict) or not isinstance(response.get("messages", {}), dict):
+        raise KeeneticSmsError("Invalid SMS list response")
+    if response.get("messages-count", 0) and not response.get("messages"):
+        raise KeeneticSmsError("SMS list contains no message details")
+    messages = []
+    for sms_id, item in response.get("messages", {}).items():
+        if not isinstance(item, dict):
+            continue
+        parts = item.get("parts")
+        total_parts = item.get("total-parts")
+        if parts is None and total_parts is None:
+            complete = True
+        else:
+            complete = (
+                type(parts) is int
+                and type(total_parts) is int
+                and parts > 0
+                and parts == total_parts
+            )
+        complete = complete and isinstance(item.get("text"), str)
+        read = item.get("read")
+        messages.append({
+            "id": str(sms_id),
+            "from": item.get("from"),
+            "timestamp": item.get("timestamp"),
+            "read": read is True or read == "yes",
+            "parts": parts,
+            "total_parts": total_parts,
+            "complete": complete,
+            "text": item.get("text") if complete else None,
+        })
+    return KeeneticSmsInbox(messages)
+
+
+class SmsEventTracker:
+    """Emit each newly completed SMS once, while baselining existing messages."""
+
+    def __init__(self) -> None:
+        self._seen: dict[str, dict[str, tuple[Any, Any]]] = {}
+
+    def new_messages(self, modem: KeeneticModemData, inbox: KeeneticSmsInbox) -> list[dict[str, Any]]:
+        completed = {
+            message["id"]: (message["timestamp"], message["text"])
+            for message in inbox.messages if message["complete"]
+        }
+        previous = self._seen.get(modem.identity)
+        self._seen[modem.identity] = {**(previous or {}), **completed}
+        if previous is None:
+            return []
+        return [
+            message for message in inbox.messages
+            if message["complete"] and previous.get(message["id"]) != completed[message["id"]]
+        ]
 
 @dataclass
 class DataDevice():
@@ -266,7 +361,10 @@ class Router:
     async def reguest_api(self, method: str, endpoint: str, json: Mapping[str, Any] | None = None, headers: str | None = None) -> tuple[aiohttp.ClientResponse]:
         url = self.url_router + endpoint
         try:
-            _LOGGER.debug(f'{self._mac} request - {endpoint} - {json}')
+            if is_sms_request(endpoint, json):
+                _LOGGER.debug('%s SMS request - %s', self._mac, endpoint)
+            else:
+                _LOGGER.debug(f'{self._mac} request - {endpoint} - {json}')
             async with self._session.request(method=method, url=url, json=json, headers=headers) as res:
                 if res.status == 200 and res.content_type == 'application/json':
                     result = await res.json()
@@ -285,6 +383,42 @@ class Router:
     async def api(self, method: str, endpoint: str, json: Mapping[str, Any] | None = {}):
         resp = await self.auth()
         return await self.reguest_api(method, endpoint, json)
+
+    async def _sms_command(self, command: str, payload: dict[str, Any]) -> Any:
+        response = await self.api("post", "/rci/", {"sms": {command: payload}})
+        if getattr(response, "status", None) is not None:
+            raise KeeneticSmsError(f"SMS {command} request failed")
+        if not isinstance(response, dict):
+            raise KeeneticSmsError(f"Invalid SMS {command} response")
+        sms = response.get("sms")
+        result = sms.get(command) if isinstance(sms, dict) else None
+        if command == "list" and not isinstance(result, dict):
+            raise KeeneticSmsError(f"Invalid SMS {command} response")
+        if command != "list" and result is None:
+            result = response
+        if not isinstance(result, dict):
+            raise KeeneticSmsError(f"Invalid SMS {command} response")
+        statuses = result.get("status", [])
+        if isinstance(statuses, dict):
+            statuses = [statuses]
+        elif isinstance(statuses, str):
+            statuses = [{"status": statuses}]
+        elif not isinstance(statuses, list):
+            statuses = []
+        if result.get("error") or any(
+            item.get("status") == "error" for item in statuses if isinstance(item, dict)
+        ):
+            raise KeeneticSmsError(f"SMS {command} failed")
+        return result
+
+    async def list_sms(self, interface: str) -> KeeneticSmsInbox:
+        return parse_sms_list(await self._sms_command("list", {"interface": interface}))
+
+    async def mark_sms_read(self, interface: str, sms_id: str) -> None:
+        await self._sms_command("read", {"interface": interface, "id": sms_id})
+
+    async def send_sms(self, interface: str, to: str, message: str) -> None:
+        await self._sms_command("send", {"interface": interface, "to": to, "message": message})
 
     async def auth(self):
         response = await self.reguest_api("get", "/auth")
@@ -543,6 +677,12 @@ class Router:
             details = {**base, **detailed_modems.get(name, {})}
             modems[name] = KeeneticModemData(name, self.modem_identity(name, details), details)
             self.request_interface[name] = f"{details.get('type', 'Mobile')} {details.get('description', '')}".strip()
+        sms = {}
+        for name in modems:
+            try:
+                sms[name] = await self.list_sms(name)
+            except Exception as err:
+                _LOGGER.debug("%s SMS polling failed for %s: %s", self._mac, name, type(err).__name__)
         show_associations = full_info_other[2]['show']['associations']
         show_rc_system_usb = full_info_other[3]['show']['rc']['system'].get('usb', [])
         show_rc_ip_http = full_info_other[4]['show']['rc']['ip']['http']
@@ -624,4 +764,5 @@ class Router:
             stat_interface,
             show_pingcheck,
             modems,
+            sms,
             )
